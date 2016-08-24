@@ -58,8 +58,8 @@ mc --quiet config host add blobs "$s3_endpoint" "$s3_access_key_id" "$s3_secret_
 
 # find our inputs
 inputs_file=$(mktemp ${TMPDIR:-/tmp}/datapact-inputs.XXXXXX)
-inputs="$( find . -path '*/.datapact/input' | grep -v "^\./$branch/" )"
-cat /dev/null $inputs | jq -sS 'sort_by(.name)' > $inputs_file
+inputs="$( find . -path '*/.datapact/input' | grep -v "^\./$branch/" || true )"
+cat /dev/null $inputs | jq -sS 'map(select(.)) | sort_by(.name)' > $inputs_file
 
 cd $result
 
@@ -162,9 +162,9 @@ git checkout .
 # do it
 # @todo filter out datapact params
 # @todo rewrite metadata with our own matching in
-jq \
-  --arg repository "$repository" \
-  '. * {"params":{"rebase":true,"repository":$repository}}' \
-  < $payload \
-  | /opt/resource/git/out "$workdir" \
-  >&3
+# jq \
+#   --arg repository "$repository" \
+#   '. * {"params":{"rebase":true,"repository":$repository}}' \
+#   < $payload \
+#   | /opt/resource/git/out "$workdir" \
+#   >&3

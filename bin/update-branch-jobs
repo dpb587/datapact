@@ -22,7 +22,7 @@ for branch in $( jq -r '.[].branch' < "$pipeline" ); do
 
   echo -n "-> commit "
   git add datapact/job.json
-  git commit -m update-branch-jobs datapact/job.json >/dev/null
+  git commit -m update-branch-jobs datapact/job.json >/dev/null || true
 
   echo "-> done"
 done

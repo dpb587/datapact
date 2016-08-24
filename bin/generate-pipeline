@@ -1,0 +1,124 @@
+#!/bin/bash
+
+set -eu
+
+# args: repository-path pipeline-base
+
+repository="$1"
+pipeline_base="$2"
+
+file_pre=$(mktemp ${TMPDIR:-/tmp}/datapact-pre.XXXXXX)
+file_post=$(mktemp ${TMPDIR:-/tmp}/datapact-post.XXXXXX)
+file_job=$(mktemp ${TMPDIR:-/tmp}/datapact-job.XXXXXX)
+
+cp "$pipeline_base" $file_pre
+
+cd "$repository"
+
+for branch in $( git branch -l | cut -c3- ); do
+  git show $branch:datapact/job.json > $file_job 2>/dev/null || true
+
+  if [ -s $file_job ]; then
+    jq \
+      --argfile job $file_job \
+      '
+        . + {
+          "jobs": (
+            .jobs +
+            [
+              {
+                "name": $job.branch,
+                "plan": [
+                  {
+                    "aggregate": (
+                      $job.input // [] | map({
+                        "get": .branch,
+                        "trigger": true
+                      }) +
+                      [
+                        {
+                          "get": $job.branch
+                        }
+                      ]
+                    )
+                  },
+                  {
+                    "task": $job.branch,
+                    "config": {
+                      "platform": ($job.task.platform // "linux"),
+                      "image_resource": {
+                        "type": ($job.task.image.type // "docker-image"),
+                        "source": $job.task.image.source
+                      },
+                      "run": ($job.task.run // {}),
+                      "params": ($job.task.env // {}),
+                      "inputs": (
+                        $job.input // [] | map({
+                          "name": .branch
+                        })
+                      ),
+                      "outputs": [
+                        {
+                          "name": "result"
+                        }
+                      ]
+                    },
+                    "privileged": ($job.task.privileged // false)
+                  },
+                  {
+                    "put": $job.branch,
+                    "params": {
+                      "repository": $job.branch
+                    },
+                    "get_params": {
+                      "download": false
+                    }
+                  }
+                ]
+              }
+            ]
+          ),
+          "resources": (
+            .resources +
+            [
+              {
+                "name": $job.branch,
+                "type": "datapact",
+                "source": (
+                  .resources | map(select(.name == "datapact-job"))[0].source
+                  + {
+                    "branch": $job.branch
+                  }
+                )
+              }
+            ]
+          )
+         }
+      ' \
+      < $file_pre \
+      > $file_post
+    cp $file_post $file_pre
+  fi
+done
+
+jq -S \
+  '
+    . + {
+      "jobs": (.jobs | sort_by(.name)),
+      "resources": (.resources | sort_by(.name) | map(select(.name != "datapact-job"))),
+      "resource_types": (
+        .resource_types +
+        [
+          {
+            "name": "datapact",
+            "type": "docker-image",
+            "source": {
+              "repository": "dpb587/datapact-resource"
+            }
+          }
+        ]
+        | sort_by(.name)
+      )
+    }
+  ' \
+  < $file_pre

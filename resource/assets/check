@@ -1,0 +1,6 @@
+#!/bin/bash
+
+set -eu
+
+jq '. + {"source":(.source + {"paths":["result/*", "result/*/*", "result/*/*/*"]})}' \
+  | /opt/resource/git/check

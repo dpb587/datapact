@@ -1,0 +1,96 @@
+#!/bin/bash
+
+set -eu
+
+# args: repository-path pipeline-file
+
+repository="$1"
+pipeline="$2"
+
+echo -n "repository -> creating "
+mkdir "$repository"
+cd "$repository"
+mkdir datapact
+git init . >/dev/null
+
+echo -n "-> README.md "
+
+(
+  echo "# $( basename "$repository" )"
+  echo
+  echo "datapact repository"
+  echo
+  echo "## setup"
+  echo
+  echo " * [ ] update [pipeline.json](./pipeline.json) with repository details"
+  echo " * [ ] regenerate the full pipeline with jobs"
+  echo " * [ ] fly set-pipeline"
+  echo " * [ ] git remote add origin ..."
+  echo " * [ ] git push --all origin"
+  echo " * [ ] fly unpause-pipeline"
+  echo
+  echo "## generate-pipeline"
+  echo
+  echo "    $ datapact/bin/generate-pipeline \$PWD"
+  echo
+) > README.md
+git add README.md
+
+echo -n "-> pipeline-base.json "
+
+jq -n '
+  {
+    "groups": [
+      # you might want to group a few jobs together here
+    ],
+    "jobs": [
+      # you might want to add your own jobs for automatically initiating data processing
+    ],
+    "resources": [
+      {
+        "name": "datapact-job",
+        "type": "datapact",
+        "source": {
+          # any git settings from https://github.com/concourse/git-resource
+          "uri": "git@github.com:example/repository.git",
+          "private_key": "something",
+
+          # s3 settings
+          "s3_endpoint": "https://s3.amazonaws.com",
+          "s3_bucket": "example-bucket",
+          "s3_access_key_id": "...",
+          "s3_secret_access_key": "..."
+        }
+      }
+    ]
+  }
+' > pipeline-base.json
+git add pipeline-base.json
+
+echo -n "-> commit "
+git commit -m bootstrap-repository README.md pipeline-base.json >/dev/null
+
+echo "-> done"
+
+for branch in $( jq -r '.[].branch' < "$pipeline" ); do
+  echo -n "$branch "
+
+  echo -n "-> branch "
+  git checkout -q --orphan "$branch" >/dev/null
+
+  echo -n "-> result "
+  mkdir -p result/0/00
+  ln -s /dev/null result/0/00/0000000000000000000000000000000000000.json
+  git add result/0/00/0000000000000000000000000000000000000.json
+
+  echo -n "-> job "
+  jq --arg branch "$branch" 'map(select(.branch == $branch))[0]' < "$pipeline" > datapact/job.json
+
+  echo -n "-> commit "
+  git add datapact/job.json >/dev/null
+  git commit -m bootstrap-repository datapact/job.json result/0/00/0000000000000000000000000000000000000.json >/dev/null
+
+  echo "-> done"
+done
+
+git checkout -q master

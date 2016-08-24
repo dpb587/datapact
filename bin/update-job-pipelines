@@ -1,0 +1,26 @@
+#!/bin/bash
+
+set -eu
+
+# args: repository-path pipeline-file
+
+repository="$1"
+pipeline="$2"
+
+for branch in $( jq -r '.[].branch' < "$pipeline" ); do
+  echo -n "$branch "
+
+  echo -n "-> branch "
+  git checkout -q "$branch" >/dev/null
+
+  echo -n "-> job "
+  jq --arg branch "$branch" 'map(select(.branch == $branch))[0]' < "$pipeline" > datapact/job.json
+
+  echo -n "-> commit "
+  git add datapact/job.json >/dev/null
+  git commit -m update-job-pipelines datapact/job.json >/dev/null
+
+  echo "-> done"
+done
+
+git checkout -q master

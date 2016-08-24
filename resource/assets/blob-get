@@ -1,0 +1,38 @@
+#!/bin/bash
+
+set -eu
+
+# stdin
+payload=$(mktemp ${TMPDIR:-/tmp}/datapact-blob-get-request.XXXXXX)
+cat > $payload
+
+# env
+: ${s3_bucket:?}
+: ${s3_prefix:=}
+
+localblob="$( jq -r '.path' < $payload )"
+remoteblob="$( jq -r '.branch + "/" + .blob' < $payload )"
+remotesize="$( jq -r '.size' < $payload )"
+
+echo -n "$localblob "
+
+# download
+echo -n "-> download "
+mc --quiet cp "blobs/$s3_bucket/$s3_prefix$remoteblob" "$localblob" > /dev/null
+
+# validate
+echo -n "-> checksum "
+checksum_sha256="$( jq -r '.checksum.sha256 // ""' < $payload )"
+echo "$checksum_sha256  $localblob" | sha256sum -c
+
+# reverse filter
+
+for filter in $( jq -r '.filters // [] | reverse[]' < $payload ); do
+  if [ "$filter" == "gz" ]; then
+    echo -n "-> decompress "
+    gzip -d "$localblob"
+    localblob="$( echo "$localblob" | sed "#\.gz$##" )"
+  fi
+done
+
+echo "-> done"

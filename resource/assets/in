@@ -1,0 +1,116 @@
+#!/bin/bash
+
+set -eu
+
+exec 3>&1 # make stdout available as fd 3 for the result
+exec 1>&2 # redirect all output to stderr for logging
+
+destination=$1
+payload=$(mktemp ${TMPDIR:-/tmp}/datapact-resource-request.XXXXXX)
+cat > $payload
+
+# let git-resource manage the repository for us
+repository=$destination/.datapact/git
+git_result=$(mktemp ${TMPDIR:-/tmp}/git-resource-result.XXXXXX)
+/opt/resource/git/in $repository < $payload > $git_result
+
+branch="$( jq -r '.metadata | map(select(.name == "branch"))[0] // {} | .value' < $git_result )"
+
+# we don't need anything checked out
+rm -fr $repository/*
+
+# validate our inputs
+download="$( jq 'if .params | has("download") then .params.download else true end' < $payload )"
+s3_endpoint="$( jq -r '.source.s3_endpoint // "https://s3.amazonaws.com"' < $payload )"
+s3_access_key_id="$( jq -r '.source.s3_access_key_id // ""' < $payload )"
+s3_secret_access_key="$( jq -r '.source.s3_secret_access_key // ""' < $payload )"
+s3_signature="$( jq -r '.source.s3_signature // "S3v4"' < $payload )"
+export s3_bucket="$( jq -r '.source.s3_bucket // ""' < $payload )"
+export s3_prefix="$( jq -r '.source.s3_prefix // ""' < $payload )"
+
+if [ -z "$s3_endpoint" ]; then
+  echo "invalid source: s3_endpoint: empty" >&2
+  exit 1
+elif [ -z "$s3_bucket" ]; then
+  echo "invalid source: s3_bucket: empty" >&2
+  exit 1
+elif [ -z "$s3_access_key_id" ]; then
+  echo "invalid source: s3_access_key_id: empty" >&2
+  exit 1
+elif [ -z "$s3_secret_access_key" ]; then
+  echo "invalid source: s3_secret_access_key: empty" >&2
+  exit 1
+elif [ -z "$s3_signature" ]; then
+  echo "invalid source: s3_signature: empty" >&2
+  exit 1
+fi
+
+mc --quiet config host add blobs "$s3_endpoint" "$s3_access_key_id" "$s3_secret_access_key" "$s3_signature" > /dev/null
+
+# find the result we're interested in
+cd $repository
+
+result_file=$(mktemp ${TMPDIR:-/tmp}/datapact-resource-manifest.XXXXXX)
+repository_head=$( git rev-parse HEAD )
+result_path="$( git diff-tree --no-commit-id --name-only -r $repository_head -- result )"
+
+if [ -z "$result_path" ]; then
+  echo "invalid version ($repository_head): exactly one result file was not found" >&2
+  exit 1
+fi
+
+result="$( echo "$result_path" | sed -E 's#result/(.)/(..)/(.....................................)\.json$#\1\2\3#' )"
+
+git show $repository_head:$result_path > $result_file
+
+result_branch="$( jq -r '.branch' < "$result_file" )"
+result_timestamp="$( jq -r '.timestamp' < "$result_file" )"
+
+# retrieve the outputs
+cd $destination
+
+if [ "$download" != "false" ]; then
+  jq -r --arg branch "$result_branch" '
+    "set -e",
+    (.output[] | "echo \(. * { "branch": $branch } | tojson | @sh) | /opt/resource/blob-get")' < $result_file \
+    | bash
+fi
+
+# remember the inputs
+jq -n \
+  --arg branch "$branch" \
+  --arg result "$result" \
+  '
+    {
+      "branch": $branch,
+      "result": $result
+    }
+  ' \
+  > .datapact/input
+
+# party
+jq -n \
+  --argjson version "$( jq '.version' < $git_result )" \
+  --arg branch "$branch" \
+  --arg result "$result" \
+  --arg timestamp "$result_timestamp" \
+  '
+    {
+      "version": $version,
+      "metadata": [
+        {
+          "name": "branch",
+          "value": $branch
+        },
+        {
+          "name": "result",
+          "value": $result
+        },
+        {
+          "name": "timestamp",
+          "value": $timestamp
+        }
+      ]
+    }
+  ' \
+  >&3

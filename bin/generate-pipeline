@@ -89,7 +89,8 @@ for branch in $( git branch -l | cut -c3- ); do
                   + {
                     "branch": $job.branch
                   }
-                )
+                ),
+                "check_interval": (.resources | map(select(.name == "datapact-job"))[0].check_interval)
               }
             ]
           )

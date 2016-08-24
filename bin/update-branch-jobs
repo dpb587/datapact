@@ -5,7 +5,10 @@ set -eu
 # args: repository-path pipeline-file
 
 repository="$1"
-pipeline="$2"
+pipeline=$(mktemp ${TMPDIR:-/tmp}/datapact-job.XXXXXX)
+cat "$2" > $pipeline
+
+cd "$repository"
 
 for branch in $( jq -r '.[].branch' < "$pipeline" ); do
   echo -n "$branch "
@@ -14,13 +17,12 @@ for branch in $( jq -r '.[].branch' < "$pipeline" ); do
   git checkout -q "$branch" >/dev/null
 
   echo -n "-> job "
+  mkdir -p datapact
   jq --arg branch "$branch" 'map(select(.branch == $branch))[0]' < "$pipeline" > datapact/job.json
 
   echo -n "-> commit "
-  git add datapact/job.json >/dev/null
-  git commit -m update-job-pipelines datapact/job.json >/dev/null
+  git add datapact/job.json
+  git commit -m update-branch-jobs datapact/job.json >/dev/null
 
   echo "-> done"
 done
-
-git checkout -q master

@@ -1,0 +1,19 @@
+#!/bin/bash
+
+set -eu
+
+# args: branch result-dir pipeline
+
+! [ -e $HOME/tmp/datapact-in ] || rm -fr $HOME/tmp/datapact-in
+mkdir $HOME/tmp/datapact-in
+
+jq \
+  --arg branch "$1" \
+  '.resources | map(select(.name == $branch))[0] * {"params":{"repository":"repository"}}' \
+  < "$3" \
+  | docker run -i -a stdin \
+    -v $2:/tmp/datapact-in \
+    --workdir /tmp/datapact-in \
+    dpb587/datapact-resource \
+    /opt/resource/in /tmp/datapact-in \
+    | xargs docker logs -f

@@ -1,0 +1,25 @@
+#!/bin/bash
+
+set -eux
+
+# args: branch result-dir pipeline repository-dir
+
+! [ -e $HOME/tmp/datapact-out ] || rm -fr $HOME/tmp/datapact-out
+git clone -b "$1" --single-branch "file://$4" $HOME/tmp/datapact-out/repository/.datapact/git
+mkdir $HOME/tmp/datapact-out/result
+cp -r "$2"/* $HOME/tmp/datapact-out/result/
+
+cd $HOME/tmp/datapact-out
+
+jq \
+  --arg branch "$1" \
+  '.resources | map(select(.name == $branch))[0] * {"params":{"repository":"repository"}}' \
+  < "$3" \
+  | docker run -i -a stdin \
+    -e ATC_EXTERNAL_URL \
+    -e BUILD_ID=one-off \
+    -v $HOME/tmp/datapact-out:/tmp/build/put \
+    --workdir /tmp/build/put \
+    dpb587/datapact-resource \
+    /opt/resource/out \
+    | xargs docker logs -f

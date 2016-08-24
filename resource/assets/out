@@ -56,12 +56,12 @@ fi
 
 mc --quiet config host add blobs "$s3_endpoint" "$s3_access_key_id" "$s3_secret_access_key" "$s3_signature" > /dev/null
 
-cd $result
-
 # find our inputs
 inputs_file=$(mktemp ${TMPDIR:-/tmp}/datapact-inputs.XXXXXX)
-inputs="$( find . -path .datapact/input )"
-cat $inputs | jq -s 'sort_by(.name)' > $inputs_file
+inputs="$( find . -path '*/.datapact/input' | grep -v "^\./$branch/" )"
+cat /dev/null $inputs | jq -sS 'sort_by(.name)' > $inputs_file
+
+cd $result
 
 # upload result files
 result_outputs=$(mktemp ${TMPDIR:-/tmp}/datapact-result-outputs.XXXXXX)
@@ -73,7 +73,7 @@ for path in $( find . -type f ! -path "./.datapact*" ); do
   echo -n "$localblob "
 
   if [[ ! "$localblob" =~ \.(bin|tgz|gz)$ ]]; then
-      echo -n "-> compress"
+      echo -n "-> compress "
       gzip "$localblob"
       localblob="$localblob.gz"
       filters="$filters,gz"
@@ -151,7 +151,7 @@ else
 fi
 
 echo >> $commit_message
-jq -rc '.input[] | {"input":.}' < $deepname >> $commit_message
+jq -rcS '.input[] | {"input":.}' < $deepname >> $commit_message
 
 git add $deepname
 git commit -F "$commit_message" -- $deepname

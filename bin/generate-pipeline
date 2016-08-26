@@ -2,109 +2,105 @@
 
 set -eu
 
-# args: repository-path pipeline-base
+# args: repository-path pipeline-base jobs
 
 repository="$1"
 pipeline_base="$2"
+jobs="$3"
 
 file_pre=$(mktemp ${TMPDIR:-/tmp}/datapact-pre.XXXXXX)
 file_post=$(mktemp ${TMPDIR:-/tmp}/datapact-post.XXXXXX)
+file_jobs=$(mktemp ${TMPDIR:-/tmp}/datapact-jobs.XXXXXX)
 file_job=$(mktemp ${TMPDIR:-/tmp}/datapact-job.XXXXXX)
 
+cp "$jobs" $file_jobs
 cp "$pipeline_base" $file_pre
 
 cd "$repository"
 
-for branch in $( git branch -l | cut -c3- ); do
-  git show $branch:datapact/job.json > $file_job 2>/dev/null || true
-
-  if [ -s $file_job ]; then
-    jq \
-      --argfile job $file_job \
-      '
-        . + {
-          "jobs": (
-            .jobs +
-            [
-              {
-                "name": $job.branch,
-                "plan": [
-                  {
-                    "aggregate": (
+for branch in $( jq -r '.[].branch' < $file_jobs ); do
+  jq --arg branch "$branch" 'map(select(.branch == $branch))[0]' < $file_jobs > $file_job
+  jq \
+    --argfile job $file_job \
+    '
+      . + {
+        "jobs": (
+          .jobs +
+          [
+            {
+              "name": $job.branch,
+              "plan": [
+                {
+                  "aggregate": (
+                    $job.input // [] | map({
+                      "get": .branch,
+                      "trigger": true,
+                      "passed": (if .passed == false then [] else [
+                        .branch
+                      ] end)
+                    })
+                  )
+                },
+                {
+                  "task": $job.branch,
+                  "config": {
+                    "platform": ($job.task.platform // "linux"),
+                    "image_resource": {
+                      "type": ($job.task.image.type // "docker-image"),
+                      "source": $job.task.image.source
+                    },
+                    "run": ($job.task.run // {}),
+                    "params": ($job.task.env // {}),
+                    "inputs": (
                       $job.input // [] | map({
-                        "get": .branch,
-                        "trigger": true
-                      }) +
-                      [
-                        {
-                          "get": $job.branch
-                        }
-                      ]
-                    )
+                        "name": .branch
+                      })
+                    ),
+                    "outputs": [
+                      {
+                        "name": "result"
+                      }
+                    ]
                   },
-                  {
-                    "task": $job.branch,
-                    "config": {
-                      "platform": ($job.task.platform // "linux"),
-                      "image_resource": {
-                        "type": ($job.task.image.type // "docker-image"),
-                        "source": $job.task.image.source
-                      },
-                      "run": ($job.task.run // {}),
-                      "params": ($job.task.env // {}),
-                      "inputs": (
-                        $job.input // [] | map({
-                          "name": .branch
-                        })
-                      ),
-                      "outputs": [
-                        {
-                          "name": "result"
-                        }
-                      ]
-                    },
-                    "privileged": ($job.task.privileged // false)
-                  },
-                  {
-                    "put": $job.branch,
-                    "params": {
-                      "repository": $job.branch
-                    },
-                    "get_params": {
-                      "download": false
-                    }
+                  "privileged": ($job.task.privileged // false)
+                },
+                {
+                  "put": $job.branch,
+                  "get_params": {
+                    "download": false
                   }
-                ]
-              }
-            ]
-          ),
-          "resources": (
-            .resources +
-            [
-              {
-                "name": $job.branch,
-                "type": "datapact",
-                "source": (
-                  .resources | map(select(.name == "datapact-job"))[0].source
-                  + {
-                    "branch": $job.branch
-                  }
-                ),
-                "check_interval": (.resources | map(select(.name == "datapact-job"))[0].check_interval)
-              }
-            ]
-          )
-         }
-      ' \
-      < $file_pre \
-      > $file_post
-    cp $file_post $file_pre
-  fi
+                }
+              ]
+            }
+          ]
+        ),
+        "resources": (
+          .resources +
+          [
+            {
+              "name": $job.branch,
+              "type": "datapact",
+              "source": (
+                .resources | map(select(.name == "datapact-job"))[0].source
+                + {
+                  "branch": $job.branch
+                }
+              ),
+              "check_interval": (.resources | map(select(.name == "datapact-job"))[0].check_interval)
+            }
+          ]
+        )
+       }
+    ' \
+    < $file_pre \
+    > $file_post
+  cp $file_post $file_pre
 done
 
 jq -S \
   '
     . + {
+      "groups": .groups,
       "jobs": (.jobs | sort_by(.name)),
       "resources": (.resources | sort_by(.name) | map(select(.name != "datapact-job"))),
       "resource_types": (
@@ -120,6 +116,6 @@ jq -S \
         ]
         | sort_by(.name)
       )
-    }
+    } as $p | $p + { "groups": ( [ { "name": "all", "jobs": ( $p.jobs | map(.name) ) } ] + $p.groups ) }
   ' \
   < $file_pre

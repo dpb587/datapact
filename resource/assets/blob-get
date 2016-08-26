@@ -23,7 +23,7 @@ mc --quiet cp "blobs/$s3_bucket/$s3_prefix$remoteblob" "$localblob" > /dev/null
 # validate
 echo -n "-> checksum "
 checksum_sha256="$( jq -r '.checksum.sha256 // ""' < $payload )"
-echo "$checksum_sha256  $localblob" | sha256sum -c
+echo "$checksum_sha256  $localblob" | sha256sum -c > /dev/null
 
 # reverse filter
 

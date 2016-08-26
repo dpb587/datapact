@@ -8,7 +8,7 @@ exec 1>&2 # redirect all output to stderr for logging
 # @todo why are we starting in /root?
 cd /tmp/build/put
 
-workdir="$PWD"
+taskdir="$PWD"
 payload=$(mktemp ${TMPDIR:-/tmp}/datapact-resource-request.XXXXXX)
 cat > $payload
 
@@ -26,15 +26,19 @@ export GIT_COMMITTER_NAME="Concourse"
 export GIT_COMMITTER_EMAIL="concourse@localhost"
 export GIT_AUTHOR_NAME="$( jq -r '.source.committer_name // env.GIT_COMMITTER_NAME' < $payload )"
 export GIT_AUTHOR_EMAIL="$( jq -r '.source.committer_email // env.GIT_COMMITTER_EMAIL' < $payload )"
-repository="$repository/.datapact/git"
 
-if [ -z "repository" ]; then
-  echo "invalid source: repository: empty" >&2
+if [ -z "$repository" ]; then
+  repository=/tmp/datapact-git
+  /opt/resource/git/in $repository < $payload > /dev/null
+fi
+
+if [ ! -e "$repository" ]; then
+  echo "invalid source: repository: missing" >&2
   exit 1
-elif [ -z "result" ]; then
+elif [ -z "$result" ]; then
   echo "invalid source: result: empty" >&2
   exit 1
-elif [ -z "branch" ]; then
+elif [ -z "$branch" ]; then
   echo "invalid source: branch: empty" >&2
   exit 1
 elif [ -z "$s3_endpoint" ]; then
@@ -58,10 +62,17 @@ mc --quiet config host add blobs "$s3_endpoint" "$s3_access_key_id" "$s3_secret_
 
 # find our inputs
 inputs_file=$(mktemp ${TMPDIR:-/tmp}/datapact-inputs.XXXXXX)
-inputs="$( find . -path '*/.datapact/input' | grep -v "^\./$branch/" || true )"
+inputs="$( find . -path '*/.datapact/result' | grep -v "^\./$branch/" || true )"
 cat /dev/null $inputs | jq -sS 'map(select(.)) | sort_by(.name)' > $inputs_file
 
 cd $result
+
+if [ -e .datapact/metadata.json ]; then
+  metadata_file="$PWD/.datapact/metadata.json"
+else
+  metadata_file=$(mktemp ${TMPDIR:-/tmp}/datapact-metadata.XXXXXX)
+  echo '[]' >$metadata_file
+fi
 
 # upload result files
 result_outputs=$(mktemp ${TMPDIR:-/tmp}/datapact-result-outputs.XXXXXX)
@@ -104,7 +115,7 @@ for path in $( find . -type f ! -path "./.datapact*" ); do
           "sha256": $sha256
         },
         "filters": ($filters | split(",") | map(select(. != "")))
-      } | to_entries | map(select(.value)) | from_entries
+      } | to_entries | map(select(.key != "filters" or ((.value|length) > 0))) | from_entries
     ' \
     >> $result_outputs
 
@@ -119,13 +130,15 @@ jq -sS \
   --arg timestamp "$timestamp" \
   --arg branch "$branch" \
   --argjson inputs "$( cat $inputs_file )" \
+  --argjson metadata "$( cat $metadata_file )" \
   '
     {
       "timestamp": $timestamp,
       "branch": $branch,
-      "input": $inputs,
+      "metadata": ($metadata // []),
+      "input": ($inputs | map({branch,result,metadata}|to_entries|map(select(.key != "metadata" or ((.value|length) > 0)))|from_entries)),
       "output": sort_by(.path)
-    }
+    } | to_entries|map(select(.key != "metadata" or ((.value|length) > 0)))|from_entries
   ' \
   < $result_outputs \
   > $result_file
@@ -133,10 +146,10 @@ jq -sS \
 # commit our result
 commit_message=$(mktemp ${TMPDIR:-/tmp}/datapact-commit.XXXXXX)
 
-sha1=$( sha1sum "$result_file" | awk '{ print $1 }' )
-deepname=$( echo "$sha1" | sed -E 's#(.)(..)(.....................................)#result/\1/\2/\3.json#' )
+sha1=$( git hash-object -t blob "$result_file" )
+deepname=$( echo "$sha1" | sed -E 's#(..)(......................................)#result/\1/\2.json#' )
 
-cd $workdir
+cd $taskdir
 cd $repository
 mkdir -p "$( dirname "$deepname" )"
 cp $result_file $deepname
@@ -151,20 +164,17 @@ else
 fi
 
 echo >> $commit_message
-jq -rcS '.input[] | {"input":.}' < $deepname >> $commit_message
+jq -rcS '.input[] | {"input":{branch,result}}' < $deepname >> $commit_message
 
 git add $deepname
 git commit -F "$commit_message" -- $deepname
 
-# @todo try to avoid doing this for git pull -r
-git checkout .
-
 # do it
 # @todo filter out datapact params
 # @todo rewrite metadata with our own matching in
-# jq \
-#   --arg repository "$repository" \
-#   '. * {"params":{"rebase":true,"repository":$repository}}' \
-#   < $payload \
-#   | /opt/resource/git/out "$workdir" \
-#   >&3
+jq \
+  --arg repository "$repository" \
+  '. * {"params":{"rebase":true,"repository":$repository}}' \
+  < $payload \
+  | /opt/resource/git/out "$taskdir" \
+  >&3

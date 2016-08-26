@@ -59,7 +59,7 @@ if [ -z "$result_path" ]; then
   exit 1
 fi
 
-result="$( echo "$result_path" | sed -E 's#result/(.)/(..)/(.....................................)\.json$#\1\2\3#' )"
+result="$( echo "$result_path" | sed -E 's#result/(..)/(......................................)\.json$#\1\2#' )"
 
 git show $repository_head:$result_path > $result_file
 
@@ -77,16 +77,15 @@ if [ "$download" != "false" ]; then
 fi
 
 # remember the inputs
-jq -n \
-  --arg branch "$branch" \
+jq \
   --arg result "$result" \
   '
-    {
-      "branch": $branch,
+    . * {
       "result": $result
     }
   ' \
-  > .datapact/input
+  < "$result_file" \
+  > .datapact/result
 
 # party
 jq -n \

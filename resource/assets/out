@@ -70,8 +70,7 @@ cd $result
 if [ -e .datapact/metadata.json ]; then
   metadata_file="$PWD/.datapact/metadata.json"
 else
-  metadata_file=$(mktemp ${TMPDIR:-/tmp}/datapact-metadata.XXXXXX)
-  echo '[]' >$metadata_file
+  metadata_file=/dev/null
 fi
 
 # upload result files
@@ -130,13 +129,13 @@ jq -sS \
   --arg timestamp "$timestamp" \
   --arg branch "$branch" \
   --argjson inputs "$( cat $inputs_file )" \
-  --argjson metadata "$( cat $metadata_file )" \
+  --slurpfile metadata "$metadata_file" \
   '
     {
       "timestamp": $timestamp,
       "branch": $branch,
       "metadata": ($metadata // []),
-      "input": ($inputs | map({branch,result,metadata}|to_entries|map(select(.key != "metadata" or ((.value|length) > 0)))|from_entries)),
+      "input": ($inputs | map({branch,result,metadata,timestamp}|to_entries|map(select(.key != "metadata" or ((.value|length) > 0)))|from_entries)),
       "output": sort_by(.path)
     } | to_entries|map(select(.key != "metadata" or ((.value|length) > 0)))|from_entries
   ' \
@@ -146,8 +145,8 @@ jq -sS \
 # commit our result
 commit_message=$(mktemp ${TMPDIR:-/tmp}/datapact-commit.XXXXXX)
 
-sha1=$( git hash-object -t blob "$result_file" )
-deepname=$( echo "$sha1" | sed -E 's#(..)(......................................)#result/\1/\2.json#' )
+result_id=$( jq -rc 'if .input | length > 0 then .input else [{"branch":"datapact-timestamp","result":.timestamp}] end | map({"input":{branch,result}})[]' < "$result_file" | sha1sum | awk '{ print $1 }' )
+deepname=$( echo "$result_id" | sed -E 's#(..)(......................................)#result/\1/\2.json#' )
 
 cd $taskdir
 cd $repository
@@ -164,7 +163,7 @@ else
 fi
 
 echo >> $commit_message
-jq -rcS '.input[] | {"input":{branch,result}}' < $deepname >> $commit_message
+jq -rcS '.input | map({"input":{branch,result}})[]' < $result_file >> $commit_message
 
 git add $deepname
 git commit -F "$commit_message" -- $deepname

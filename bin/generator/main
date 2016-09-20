@@ -1,0 +1,212 @@
+#!/bin/bash
+
+set -eu
+
+if [[ "${DEBUG:-false}" == "true" ]]; then
+  set -x
+fi
+
+if [ -e datapact.jq ]; then
+  config=datapact.jq
+elif [ -e datapact.json ]; then
+  config=datapact.json
+else
+  echo "Missing datapact.jq or datapact.json file" >&2
+  exit 1
+fi
+
+if [ -z "${1:-}" ]; then
+  pipeline="$( basename "$PWD" )"
+else
+  pipeline="$1"
+fi
+
+tmp="$( mktemp -d ${TMPDIR:-/tmp}/datapact.XXXXXX )"
+jq -nf $config > "$tmp/datapact.json"
+mkdir "$tmp/objects"
+
+jq '.datapact_job' \
+  < "$tmp/datapact.json" \
+  > "$tmp/datapact-job.json"
+
+jq \
+  '
+    .pipeline | to_entries | map(select(.key != "groups"))[] | .key as $type | .value | map({ ($type) : . })[]
+  ' \
+  < "$tmp/datapact.json" \
+  > "$tmp/objects/pipeline.json"
+
+jq \
+  '
+    {
+      "resource_types": (
+        .datapact_resource_type
+        // {
+          "name": "datapact",
+          "type": "docker-image",
+          "source": {
+            "repository": "dpb587/datapact-resource"
+          }
+        }
+      )
+    }
+  ' \
+  < "$tmp/datapact.json" \
+  > "$tmp/objects/resource_types-datapact.json"
+
+jq \
+  '
+    .pipeline.groups // [] | map(
+      . as $group
+      | .jobs | map({
+        "group": $group.name,
+        "job": .
+      })[]
+    )[]
+  ' \
+  < "$tmp/datapact.json" \
+  > "$tmp/objects-groups.json"
+
+for branch in $( jq -r '.branch_list[].branch' < "$tmp/datapact.json" ); do
+  #git show "$branch:config/job.json"
+  jq -nf ../$branch/config/job.json \
+    | jq \
+      --arg branch "$branch" \
+      '{ "branch": $branch } + .' \
+      > "$tmp/branch.json"
+
+  jq \
+    '
+      . as $job
+      | .groups // [] | map({
+        "group": .,
+        "job": $job.branch
+      })[]
+    ' \
+    < "$tmp/branch.json" \
+    >> "$tmp/objects-groups.json"
+
+  jq \
+    '
+      . as $job
+      | .input | map(select(.branch == null))
+      | map({
+        "resources": (
+          {
+            "name": ( $job.branch + "-raw-" + .alias )
+          }
+          + .resource
+        )
+      })[]
+    ' \
+    < "$tmp/branch.json" \
+    > "$tmp/objects/resources-$branch-custom.json"
+
+  jq \
+    '
+      . as $job
+      | {
+        "jobs": {
+          "name": $job.branch,
+          "serial_groups": ( $job.serial_groups // [] ),
+          "plan": [
+            {
+              "aggregate": (
+                $job.input // [] | map({
+                  "get": ( .alias // ( .branch // ( $job.branch + "-raw-" + .alias ) ) ),
+                  "resource": ( .branch // ( .branch // ( $job.branch + "-raw-" + .alias ) ) ),
+                  "trigger": true,
+                  "version": "every",
+                  "passed": (if .passed == false or .branch == null then [] else [
+                    .branch
+                  ] end)
+                })
+              )
+            },
+            {
+              "task": $job.branch,
+              "config": {
+                "platform": ($job.task.platform // "linux"),
+                "image_resource": {
+                  "type": ($job.task.image.type // "docker-image"),
+                  "source": $job.task.image.source
+                },
+                "run": ($job.task.run // {}),
+                "params": ($job.task.env // {}),
+                "inputs": (
+                  $job.input // [] | map({
+                    "name": ( .alias // ( .branch // ( $job.branch + "-raw-" + .alias ) ) )
+                  })
+                ),
+                "outputs": [
+                  {
+                    "name": "result"
+                  }
+                ]
+              },
+              "privileged": ($job.task.privileged // false)
+            },
+            {
+              "put": $job.branch,
+              "get_params": {
+                "download": false
+              }
+            }
+          ]
+        }
+      }
+    ' \
+    < "$tmp/branch.json" \
+    > "$tmp/objects/jobs-$branch.json"
+
+  jq \
+    --argfile datapact "$tmp/datapact-job.json" \
+    '
+      . as $job
+      | {
+        "resources": {
+          "name": $job.branch,
+          "type": "datapact",
+          "source": (
+            $datapact.source
+            + {
+              "branch": $job.branch
+            }
+          ),
+          "check_interval": $datapact.check_interval
+        }
+      }
+    ' \
+    < "$tmp/branch.json" \
+    > "$tmp/objects/resources-$branch.json"
+done
+
+cat "$tmp/objects-groups.json" \
+  | jq -s \
+    '
+      group_by(.group)
+      | map({
+        "groups": {
+          "name": .[0].group,
+          "jobs": ( map(.job) | unique )
+        }
+      })[]
+    ' \
+    > "$tmp/objects/groups.json"
+
+cat "$tmp/objects/"*.json \
+  | jq -sS \
+    '
+      map(to_entries[0])
+      | group_by(.key)
+      | map({
+        "key": .[0].key,
+        "value": map(.value)
+      })
+      | from_entries
+      | to_entries | map({ key, "value": ( .value | sort_by(.name) ) }) | sort_by(.key) | from_entries
+      | . as $p
+      | $p + { "groups": ( [ { "name": "all", "jobs": ( $p.jobs | map(.name) ) } ] + ( $p.groups // [] ) ) }
+    '
+
+rm -fr "$tmp"
